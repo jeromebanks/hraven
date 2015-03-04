@@ -186,9 +186,11 @@ private static final Log LOG = LogFactory.getLog(TestJsonSerde.class);
     assertEquals(flow1.getCluster(), flow2.getCluster());
     assertEquals(flow1.getSubmitTime(), flow2.getSubmitTime());
     assertEquals(flow1.getDuration(), flow2.getDuration());
+    assertEquals(flow1.getWallClockTime(), flow2.getWallClockTime());
     assertEquals(flow1.getRunId(), flow2.getRunId());
     assertEquals(flow1.getMapSlotMillis(), flow2.getMapSlotMillis());
     assertEquals(flow1.getReduceSlotMillis(), flow2.getReduceSlotMillis());
+    assertEquals(flow1.getMegabyteMillis(), flow2.getMegabyteMillis());
     assertEquals(flow1.getHdfsBytesRead(), flow2.getHdfsBytesRead());
     assertEquals(flow1.getHdfsBytesWritten(), flow2.getHdfsBytesWritten());
     assertEquals(flow1.getJobGraphJSON(), flow2.getJobGraphJSON());
@@ -198,6 +200,7 @@ private static final Log LOG = LogFactory.getLog(TestJsonSerde.class);
     assertEquals(flow1.getTotalMaps(), flow2.getTotalMaps());
     assertEquals(flow1.getTotalReduces(), flow2.getTotalReduces());
     assertEquals(flow1.getVersion(), flow2.getVersion());
+    assertEquals(flow1.getHadoopVersion(), flow2.getHadoopVersion());
     assertEquals(flow1.getUserName(), flow2.getUserName());
     assertJobListEquals(flow1.getJobs(), flow2.getJobs());
   }
@@ -218,6 +221,8 @@ private static final Log LOG = LogFactory.getLog(TestJsonSerde.class);
       assertEquals(job1.get(j).getRunTime(), job2.get(j).getRunTime());
       assertEquals(job1.get(j).getMapSlotMillis(), job2.get(j).getMapSlotMillis());
       assertEquals(job1.get(j).getReduceSlotMillis(), job2.get(j).getReduceSlotMillis());
+      assertEquals(job1.get(j).getMegabyteMillis(), job2.get(j).getMegabyteMillis());
+      assertEquals(job1.get(j).getHadoopVersion(), job2.get(j).getHadoopVersion());
       assertEquals(job1.get(j).getUser(), job2.get(j).getUser());
     }
   }

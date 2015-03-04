@@ -24,6 +24,8 @@ import java.util.Map;
 import java.util.Map.Entry;
 
 import com.google.common.base.Stopwatch;
+import com.google.common.util.concurrent.AtomicDouble;
+
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
@@ -34,7 +36,7 @@ import org.apache.hadoop.hbase.client.Put;
 import org.apache.hadoop.hbase.client.Result;
 import org.apache.hadoop.hbase.client.ResultScanner;
 import org.apache.hadoop.hbase.client.Scan;
-import org.apache.hadoop.hbase.filter.BinaryPrefixComparator;
+import org.apache.hadoop.hbase.filter.RegexStringComparator;
 import org.apache.hadoop.hbase.filter.CompareFilter;
 import org.apache.hadoop.hbase.filter.Filter;
 import org.apache.hadoop.hbase.filter.FilterList;
@@ -43,9 +45,10 @@ import org.apache.hadoop.hbase.filter.QualifierFilter;
 import org.apache.hadoop.hbase.filter.SingleColumnValueFilter;
 import org.apache.hadoop.hbase.filter.WhileMatchFilter;
 import org.apache.hadoop.hbase.util.Bytes;
-import com.twitter.hraven.JobHistoryKeys;
+
 import com.twitter.hraven.*;
 import com.twitter.hraven.util.ByteUtil;
+import com.twitter.hraven.util.HadoopConfUtil;
 
 /**
  */
@@ -59,11 +62,14 @@ public class JobHistoryService {
   private final JobKeyConverter jobKeyConv = new JobKeyConverter();
   private final TaskKeyConverter taskKeyConv = new TaskKeyConverter();
 
+  private final int defaultScannerCaching;
+
   public JobHistoryService(Configuration myConf) throws IOException {
     this.myConf = myConf;
     this.historyTable = new HTable(myConf, Constants.HISTORY_TABLE_BYTES);
     this.taskTable = new HTable(myConf, Constants.HISTORY_TASK_TABLE_BYTES);
     this.idService = new JobHistoryByIdService(this.myConf);
+    this.defaultScannerCaching = myConf.getInt("hbase.client.scanner.caching", 100);
   }
 
   /**
@@ -186,10 +192,39 @@ public class JobHistoryService {
   }
 
   /**
+   * creates a scan for flow data
+   * @param rowPrefix - start row prefix
+   * @param limit - limit on scanned results
+   * @param version - version to match
+   * @return Scan
+   */
+  private Scan createFlowScan(byte[] rowPrefix, int limit, String version) {
+    Scan scan = new Scan();
+    scan.setStartRow(rowPrefix);
+
+    // using a large scanner caching value with a small limit can mean we scan a lot more data than
+    // necessary, so lower the caching for low limits
+    scan.setCaching(Math.min(limit, defaultScannerCaching));
+    // require that all rows match the prefix we're looking for
+    Filter prefixFilter = new WhileMatchFilter(new PrefixFilter(rowPrefix));
+    // if version is passed, restrict the rows returned to that version
+    if (version != null && version.length() > 0) {
+      FilterList filters = new FilterList(FilterList.Operator.MUST_PASS_ALL);
+      filters.addFilter(prefixFilter);
+      filters.addFilter(new SingleColumnValueFilter(Constants.INFO_FAM_BYTES,
+          Constants.VERSION_COLUMN_BYTES, CompareFilter.CompareOp.EQUAL, Bytes.toBytes(version)));
+      scan.setFilter(filters);
+    } else {
+      scan.setFilter(prefixFilter);
+    }
+    return scan;
+  }
+
+  /**
    * Returns the most recent {@link Flow} runs, up to {@code limit} instances.
    * If the {@code version} parameter is non-null, the returned results will be
    * restricted to those matching this app version.
-   * 
+   *
    * @param cluster
    *          the cluster where the jobs were run
    * @param user
@@ -210,22 +245,58 @@ public class JobHistoryService {
     // TODO: use RunMatchFilter to limit scan on the server side
     byte[] rowPrefix = Bytes.toBytes(cluster + Constants.SEP + user
         + Constants.SEP + appId + Constants.SEP);
-    Scan scan = new Scan();
-    scan.setStartRow(rowPrefix);
-    // require that all rows match the prefix we're looking for
-    Filter prefixFilter = new WhileMatchFilter(new PrefixFilter(rowPrefix));
-    // if version is passed, restrict the rows returned to that version
-    if (version != null && version.length() > 0) {
-      FilterList filters = new FilterList(FilterList.Operator.MUST_PASS_ALL);
-      filters.addFilter(prefixFilter);
-      filters.addFilter(new SingleColumnValueFilter(Constants.INFO_FAM_BYTES,
-          Constants.VERSION_COLUMN_BYTES, CompareFilter.CompareOp.EQUAL, Bytes
-              .toBytes(version)));
-      scan.setFilter(filters);
-    } else {
-      scan.setFilter(prefixFilter);
+    Scan scan = createFlowScan(rowPrefix, limit, version);
+    return createFromResults(scan, populateTasks, limit);
+  }
+
+  /**
+   * Returns the most recent {@link Flow} runs within that time range,
+   * up to {@code limit} instances.
+   * If the {@code version} parameter is non-null, the returned results will be
+   * restricted to those matching this app version.
+   *
+   * @param cluster
+   *          the cluster where the jobs were run
+   * @param user
+   *          the user running the jobs
+   * @param appId
+   *          the application identifier for the jobs
+   * @param version
+   *          if non-null, only flows matching this application version will be
+   *          returned
+   * @param startTime
+   *          the start time for the flows to be looked at
+   * @param endTime
+   *          the end time for the flows to be looked at
+   * @param populateTasks
+   *          if {@code true}, then TaskDetails will be populated for each job
+   * @param limit
+   *          the maximum number of flows to return
+   * @return
+   */
+  public List<Flow> getFlowSeries(String cluster, String user, String appId, String version,
+      boolean populateTasks, long startTime, long endTime, int limit) throws IOException {
+    // TODO: use RunMatchFilter to limit scan on the server side
+    byte[] rowPrefix =
+        Bytes.toBytes(cluster + Constants.SEP + user + Constants.SEP + appId + Constants.SEP);
+    Scan scan = createFlowScan(rowPrefix, limit, version);
+
+    // set the start and stop rows for scan so that it's time bound
+    if (endTime != 0) {
+      byte[] scanStartRow;
+      // use end time in start row, if present
+      long endRunId = FlowKey.encodeRunId(endTime);
+      scanStartRow = Bytes.add(rowPrefix, Bytes.toBytes(endRunId), Constants.SEP_BYTES);
+      scan.setStartRow(scanStartRow);
     }
 
+    if (startTime != 0) {
+      byte[] scanStopRow;
+      // use start time in stop row, if present
+      long stopRunId = FlowKey.encodeRunId(startTime);
+      scanStopRow = Bytes.add(rowPrefix, Bytes.toBytes(stopRunId), Constants.SEP_BYTES);
+      scan.setStopRow(scanStopRow);
+    }
     return createFromResults(scan, populateTasks, limit);
   }
 
@@ -300,14 +371,15 @@ public class JobHistoryService {
               .toBytes(version)));
     }
 
-    // always ignore job configuration data
-    filters.addFilter(
-        new QualifierFilter(CompareFilter.CompareOp.NOT_EQUAL,
-            new BinaryPrefixComparator(
-                Bytes.add(Constants.JOB_CONF_COLUMN_PREFIX_BYTES, Constants.SEP_BYTES))));
+    // filter out all config columns except the queue name
+    filters.addFilter(new QualifierFilter(
+      CompareFilter.CompareOp.NOT_EQUAL,
+        new RegexStringComparator(
+          "^c\\!((?!" + Constants.HRAVEN_QUEUE + ").)*$")));
 
     scan.setFilter(filters);
 
+    LOG.info("scan : \n " + scan.toJSON() + " \n");
     return createFromResults(scan, false, limit);
   }
 
@@ -370,14 +442,18 @@ public class JobHistoryService {
     ResultScanner scanner = null;
     try {
       Stopwatch timer = new Stopwatch().start();
+      Stopwatch timerJob = new Stopwatch();
       int rowCount = 0;
       long colCount = 0;
+      long resultSize = 0;
+      int jobCount = 0;
       scanner = historyTable.getScanner(scan);
       Flow currentFlow = null;
       for (Result result : scanner) {
         if (result != null && !result.isEmpty()) {
           rowCount++;
           colCount += result.size();
+          resultSize += result.getWritableSize();
           JobKey currentKey = jobKeyConv.fromBytes(result.getRow());
           // empty runId is special cased -- we need to treat each job as it's own flow
           if (currentFlow == null || !currentFlow.contains(currentKey) ||
@@ -389,13 +465,24 @@ public class JobHistoryService {
             currentFlow = new Flow(new FlowKey(currentKey));
             flows.add(currentFlow);
           }
+          timerJob.start();
           JobDetails job = new JobDetails(currentKey);
           job.populate(result);
           currentFlow.addJob(job);
+          jobCount++;
+          timerJob.stop();
         }
       }
       timer.stop();
-      LOG.debug("Fetched "+rowCount+" rows, " + colCount + " columns in "+timer);
+      LOG.info("Fetched from hbase " + rowCount + " rows, " + colCount + " columns, "
+          + flows.size() + " flows and " + jobCount + " jobs taking up "
+          + resultSize + " bytes ( " + (double) resultSize / (1024.0 * 1024.0)
+          + " atomic double: " + new AtomicDouble(resultSize / (1024.0 * 1024.0))
+          + ") MB, in total time of " + timer + " with  " + timerJob
+          + " spent inJobDetails & Flow population");
+
+      // export the size of data fetched from hbase as a metric
+      HravenResponseMetrics.FLOW_HBASE_RESULT_SIZE_VALUE.set((double) (resultSize / (1024.0 * 1024.0)));
     } finally {
       if (scanner != null) {
         scanner.close();
@@ -583,10 +670,38 @@ public class JobHistoryService {
   }
 
   /**
+   * sets the hRavenQueueName in the jobPut
+   * so that it's independent of hadoop1/hadoop2 queue/pool names
+   *
+   * @param jobConf
+   * @param jobPut
+   * @param jobKey
+   * @param jobConfColumnPrefix
+   *
+   * @throws IllegalArgumentException if neither config param is found
+   */
+   static void setHravenQueueNamePut(Configuration jobConf, Put jobPut,
+		   JobKey jobKey, byte[] jobConfColumnPrefix) {
+
+     String hRavenQueueName = HadoopConfUtil.getQueueName(jobConf);
+     if (hRavenQueueName.equalsIgnoreCase(Constants.DEFAULT_VALUE_QUEUENAME)){
+       // due to a bug in hadoop2, the queue name value is the string "default"
+       // hence set it to username
+       hRavenQueueName = jobKey.getUserName();
+     }
+
+     // set the "queue" property defined by hRaven
+     // this makes it independent of hadoop version config parameters
+     byte[] column = Bytes.add(jobConfColumnPrefix, Constants.HRAVEN_QUEUE_BYTES);
+     jobPut.add(Constants.INFO_FAM_BYTES, column,
+    			  Bytes.toBytes(hRavenQueueName));
+   }
+
+  /**
    * Returns the HBase {@code Put} instances to store for the given
    * {@code Configuration} data. Each configuration property will be stored as a
    * separate key value.
-   * 
+   *
    * @param jobDesc
    *          the {@link JobDesc} generated for the job
    * @param jobConf
@@ -620,6 +735,9 @@ public class JobHistoryService {
       jobPut.add(Constants.INFO_FAM_BYTES, column,
           Bytes.toBytes(entry.getValue()));
     }
+
+    // ensure pool/queuename is set correctly
+    setHravenQueueNamePut(jobConf, jobPut, jobKey, jobConfColumnPrefix);
 
     puts.add(jobPut);
 
@@ -708,4 +826,5 @@ public class JobHistoryService {
       throw caught;
     }
   }
+
 }

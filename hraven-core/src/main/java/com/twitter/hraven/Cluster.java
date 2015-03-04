@@ -16,25 +16,46 @@ limitations under the License.
 package com.twitter.hraven;
 
 import java.io.IOException;
+import java.io.InputStream;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Properties;
 import java.util.Set;
 
+import org.apache.commons.lang.StringUtils;
+import org.apache.commons.logging.Log;
+import org.apache.commons.logging.LogFactory;
+
 public class Cluster {
   private static Map<String, String> CLUSTERS_BY_HOST = new HashMap<String, String>();
+  private static Log LOG = LogFactory.getLog(Cluster.class);
 
   public static String getIdentifier(String hostname) {
     return CLUSTERS_BY_HOST.get(hostname);
   }
 
   static {
+    loadHadoopClustersProps(null);
+  }
+
+  // package level visibility to enable
+  // testing with different properties file names
+  static void loadHadoopClustersProps(String filename) {
     // read the property file
     // populate the map
     Properties prop = new Properties();
+    if (StringUtils.isBlank(filename)) {
+      filename = Constants.HRAVEN_CLUSTER_PROPERTIES_FILENAME;
+    }
     try {
       //TODO : property file to be moved out from resources into config dir
-      prop.load(Cluster.class.getResourceAsStream("/hadoopclusters.properties"));
+      InputStream inp = Cluster.class.getResourceAsStream("/" + filename);
+      if (inp == null) {
+        LOG.error(filename
+            + " for mapping clusters to cluster identifiers in hRaven does not exist");
+        return;
+      }
+      prop.load(inp);
       Set<String> hostnames = prop.stringPropertyNames();
       for (String h : hostnames) {
         CLUSTERS_BY_HOST.put(h, prop.getProperty(h));
@@ -43,8 +64,8 @@ public class Cluster {
       // An ExceptionInInitializerError will be thrown to indicate that an
       // exception occurred during evaluation of a static initializer or the
       // initializer for a static variable.
-      throw new ExceptionInInitializerError(
-          " Could not load properties file hadoopclusters.properties ");
+      throw new ExceptionInInitializerError(" Could not load properties file " + filename
+          + " for mapping clusters to cluster identifiers in hRaven");
     }
   }
 }

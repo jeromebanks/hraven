@@ -30,11 +30,19 @@ import org.codehaus.jackson.map.ObjectMapper;
 import org.codehaus.jackson.map.SerializationConfig.Feature;
 import org.codehaus.jackson.map.SerializerProvider;
 import org.codehaus.jackson.map.module.SimpleModule;
+import org.apache.commons.lang.StringUtils;
+import org.apache.commons.logging.Log;
+import org.apache.commons.logging.LogFactory;
 
 import com.google.common.base.Predicate;
+import com.twitter.hraven.AppSummary;
+import com.twitter.hraven.Constants;
 import com.twitter.hraven.Counter;
 import com.twitter.hraven.CounterMap;
 import com.twitter.hraven.Flow;
+import com.twitter.hraven.HdfsStats;
+import com.twitter.hraven.HdfsStatsKey;
+import com.twitter.hraven.QualifiedPathKey;
 
 /**
  * Class that provides custom JSON bindings (where needed) for out object model.
@@ -42,6 +50,9 @@ import com.twitter.hraven.Flow;
 @Provider
 public class ObjectMapperProvider implements ContextResolver<ObjectMapper> {
   private final ObjectMapper customMapper;
+
+  @SuppressWarnings("unused")
+  private static final Log LOG = LogFactory.getLog(ObjectMapperProvider.class);
 
   public ObjectMapperProvider() {
     customMapper = createCustomMapper();
@@ -58,6 +69,7 @@ public class ObjectMapperProvider implements ContextResolver<ObjectMapper> {
     SimpleModule module = new SimpleModule("hRavenModule", new Version(0, 4, 0, null));
     addJobMappings(module);
     module.addSerializer(Flow.class, new FlowSerializer());
+    module.addSerializer(AppSummary.class, new AppSummarySerializer());
     result.registerModule(module);
     return result;
   }
@@ -65,6 +77,7 @@ public class ObjectMapperProvider implements ContextResolver<ObjectMapper> {
   private static SimpleModule addJobMappings(SimpleModule module) {
     module.addSerializer(Configuration.class, new ConfigurationSerializer());
     module.addSerializer(CounterMap.class, new CounterSerializer());
+    module.addSerializer(HdfsStats.class, new HdfsStatsSerializer());
     return module;
   }
 
@@ -90,6 +103,64 @@ public class ObjectMapperProvider implements ContextResolver<ObjectMapper> {
           jsonGenerator.writeString(kvp.getValue());
         }
       }
+      jsonGenerator.writeEndObject();
+    }
+  }
+
+  /**
+   * Custom serializer for HdfsStats object
+   */
+  public static class HdfsStatsSerializer extends JsonSerializer<HdfsStats> {
+
+    @Override
+    public void serialize(HdfsStats hdfsStats, JsonGenerator jsonGenerator,
+                          SerializerProvider serializerProvider) throws IOException {
+
+      jsonGenerator.writeStartObject();
+      jsonGenerator.writeFieldName("hdfsStatsKey");
+      HdfsStatsKey hk = hdfsStats.getHdfsStatsKey();
+      QualifiedPathKey qpk = hk.getQualifiedPathKey();
+      jsonGenerator.writeStartObject();
+      jsonGenerator.writeFieldName("cluster");
+      jsonGenerator.writeString(qpk.getCluster());
+      if (StringUtils.isNotBlank(qpk.getNamespace())) {
+        jsonGenerator.writeFieldName("namespace");
+        jsonGenerator.writeString(qpk.getNamespace());
+      }
+      jsonGenerator.writeFieldName("path");
+      jsonGenerator.writeString(qpk.getPath());
+      jsonGenerator.writeFieldName("runId");
+      jsonGenerator.writeNumber(hk.getRunId());
+      jsonGenerator.writeEndObject();
+      jsonGenerator.writeFieldName("fileCount");
+      jsonGenerator.writeNumber(hdfsStats.getFileCount());
+      jsonGenerator.writeFieldName("dirCount");
+      jsonGenerator.writeNumber(hdfsStats.getDirCount());
+      jsonGenerator.writeFieldName("spaceConsumed");
+      jsonGenerator.writeNumber(hdfsStats.getSpaceConsumed());
+      jsonGenerator.writeFieldName("owner");
+      jsonGenerator.writeString(hdfsStats.getOwner());
+      jsonGenerator.writeFieldName("quota");
+      jsonGenerator.writeNumber(hdfsStats.getQuota());
+      jsonGenerator.writeFieldName("spaceQuota");
+      jsonGenerator.writeNumber(hdfsStats.getSpaceQuota());
+      jsonGenerator.writeFieldName("trashFileCount");
+      jsonGenerator.writeNumber(hdfsStats.getTrashFileCount());
+      jsonGenerator.writeFieldName("trashSpaceConsumed");
+      jsonGenerator.writeNumber(hdfsStats.getTrashSpaceConsumed());
+      jsonGenerator.writeFieldName("tmpFileCount");
+      jsonGenerator.writeNumber(hdfsStats.getTmpFileCount());
+      jsonGenerator.writeFieldName("tmpSpaceConsumed");
+      jsonGenerator.writeNumber(hdfsStats.getTmpSpaceConsumed());
+      jsonGenerator.writeFieldName("accessCountTotal");
+      jsonGenerator.writeNumber(hdfsStats.getAccessCountTotal());
+      jsonGenerator.writeFieldName("accessCost");
+      jsonGenerator.writeNumber(hdfsStats.getAccessCost());
+      jsonGenerator.writeFieldName("storageCost");
+      jsonGenerator.writeNumber(hdfsStats.getStorageCost());
+      jsonGenerator.writeFieldName("hdfsCost");
+      jsonGenerator.writeNumber(hdfsStats.getHdfsCost());
+
       jsonGenerator.writeEndObject();
     }
   }
@@ -126,6 +197,7 @@ public class ObjectMapperProvider implements ContextResolver<ObjectMapper> {
    * fields to include in serialized response
    */
   public static class FlowSerializer extends JsonSerializer<Flow> {
+    @SuppressWarnings("deprecation")
     @Override
     public void serialize(Flow aFlow, JsonGenerator jsonGenerator,
         SerializerProvider serializerProvider) throws IOException {
@@ -138,9 +210,9 @@ public class ObjectMapperProvider implements ContextResolver<ObjectMapper> {
             addJobMappings(new SimpleModule("hRavenModule", new Version(0, 4, 0, null))));
         om.writeValue(jsonGenerator, aFlow);
       } else {
-        jsonGenerator.writeStartObject();
         if (selectedSerialization == SerializationContext.DetailLevel.FLOW_SUMMARY_STATS_ONLY
             || selectedSerialization == SerializationContext.DetailLevel.FLOW_SUMMARY_STATS_WITH_JOB_STATS) {
+          jsonGenerator.writeStartObject();
           // serialize the FlowKey object
           jsonGenerator.writeFieldName("flowKey");
           jsonGenerator.writeObject(aFlow.getFlowKey());
@@ -149,8 +221,6 @@ public class ObjectMapperProvider implements ContextResolver<ObjectMapper> {
           jsonGenerator.writeString(aFlow.getFlowName());
           jsonGenerator.writeFieldName("userName");
           jsonGenerator.writeString(aFlow.getUserName());
-          jsonGenerator.writeFieldName("progress");
-          jsonGenerator.writeNumber(aFlow.getProgress());
           jsonGenerator.writeFieldName("jobCount");
           jsonGenerator.writeNumber(aFlow.getJobCount());
           jsonGenerator.writeFieldName("totalMaps");
@@ -171,10 +241,16 @@ public class ObjectMapperProvider implements ContextResolver<ObjectMapper> {
           jsonGenerator.writeNumber(aFlow.getMapSlotMillis());
           jsonGenerator.writeFieldName("reduceSlotMillis");
           jsonGenerator.writeNumber(aFlow.getReduceSlotMillis());
+          jsonGenerator.writeFieldName("megabyteMillis");
+          jsonGenerator.writeNumber(aFlow.getMegabyteMillis());
+          jsonGenerator.writeFieldName("cost");
+          jsonGenerator.writeNumber(aFlow.getCost());
           jsonGenerator.writeFieldName("reduceShuffleBytes");
           jsonGenerator.writeNumber(aFlow.getReduceShuffleBytes());
           jsonGenerator.writeFieldName("duration");
           jsonGenerator.writeNumber(aFlow.getDuration());
+          jsonGenerator.writeFieldName("wallClockTime");
+          jsonGenerator.writeNumber(aFlow.getWallClockTime());
           jsonGenerator.writeFieldName("cluster");
           jsonGenerator.writeString(aFlow.getCluster());
           jsonGenerator.writeFieldName("appId");
@@ -183,17 +259,110 @@ public class ObjectMapperProvider implements ContextResolver<ObjectMapper> {
           jsonGenerator.writeNumber(aFlow.getRunId());
           jsonGenerator.writeFieldName("version");
           jsonGenerator.writeString(aFlow.getVersion());
-
+          jsonGenerator.writeFieldName("hadoopVersion");
+          /**
+           *  unlikely that the next line with .toString 
+           *  will throw NPE since Flow class always sets
+           *  default hadoop version in Flow#addJob
+           */
+          jsonGenerator.writeString(aFlow.getHadoopVersion().toString());
+          jsonGenerator.writeFieldName(Constants.HRAVEN_QUEUE);
+          jsonGenerator.writeString(aFlow.getQueue());
+          jsonGenerator.writeFieldName("counters");
+          jsonGenerator.writeObject(aFlow.getCounters());
+          jsonGenerator.writeFieldName("mapCounters");
+          jsonGenerator.writeObject(aFlow.getMapCounters());
+          jsonGenerator.writeFieldName("reduceCounters");
+          jsonGenerator.writeObject(aFlow.getReduceCounters());
           // if flag, include job details
           if (selectedSerialization ==
               SerializationContext.DetailLevel.FLOW_SUMMARY_STATS_WITH_JOB_STATS) {
             jsonGenerator.writeFieldName("jobs");
             jsonGenerator.writeObject(aFlow.getJobs());
           }
+          jsonGenerator.writeEndObject();
         }
-        jsonGenerator.writeEndObject();
       }
-      // reset the serializationContext variable back to an initialValue
+    }
+  }
+
+  /**
+   * Custom serializer for App object. We don't want to serialize the
+   * classLoader. based on the parameters passed by caller, we determine which
+   * fields to include in serialized response
+   */
+  public static class AppSummarySerializer extends JsonSerializer<AppSummary> {
+    @Override
+    public void serialize(AppSummary anApp, JsonGenerator jsonGenerator,
+        SerializerProvider serializerProvider) throws IOException {
+      SerializationContext.DetailLevel selectedSerialization =
+          RestJSONResource.serializationContext.get().getLevel();
+      if (selectedSerialization == SerializationContext.DetailLevel.EVERYTHING) {
+        // should generate the json for everything in the flow object
+        ObjectMapper om = new ObjectMapper();
+        om.registerModule(
+            addJobMappings(new SimpleModule("hRavenModule", new Version(0, 4, 0, null))));
+        om.writeValue(jsonGenerator, anApp);
+      } else {
+        if (selectedSerialization == SerializationContext.DetailLevel.APP_SUMMARY_STATS_NEW_JOBS_ONLY) {
+          // should generate the json for everything in the flow object
+          ObjectMapper om = new ObjectMapper();
+          om.registerModule(
+              addJobMappings(new SimpleModule("hRavenModule", new Version(0, 4, 0, null))));
+          jsonGenerator.writeStartObject();
+          jsonGenerator.writeFieldName("cluster");
+          jsonGenerator.writeString(anApp.getKey().getCluster());
+          jsonGenerator.writeFieldName("userName");
+          jsonGenerator.writeString(anApp.getKey().getUserName());
+          jsonGenerator.writeFieldName("appId");
+          jsonGenerator.writeString(anApp.getKey().getAppId());
+          jsonGenerator.writeFieldName("queue");
+          jsonGenerator.writeObject(anApp.getQueue());
+          jsonGenerator.writeFieldName("numberRuns");
+          jsonGenerator.writeNumber(anApp.getNumberRuns());
+          jsonGenerator.writeFieldName("firstRunId");
+          jsonGenerator.writeNumber(anApp.getFirstRunId());
+          jsonGenerator.writeFieldName("lastRunId");
+          jsonGenerator.writeNumber(anApp.getLastRunId());
+          jsonGenerator.writeEndObject();
+        } else if (selectedSerialization == SerializationContext.DetailLevel.APP_SUMMARY_STATS_ALL_APPS) {
+          // should generate the json for everything in the flow object
+          ObjectMapper om = new ObjectMapper();
+          om.registerModule(
+              addJobMappings(new SimpleModule("hRavenModule", new Version(0, 4, 0, null))));
+          jsonGenerator.writeStartObject();
+          jsonGenerator.writeFieldName("cluster");
+          jsonGenerator.writeString(anApp.getKey().getCluster());
+          jsonGenerator.writeFieldName("userName");
+          jsonGenerator.writeString(anApp.getKey().getUserName());
+          jsonGenerator.writeFieldName("appId");
+          jsonGenerator.writeString(anApp.getKey().getAppId());
+          jsonGenerator.writeFieldName("queue");
+          jsonGenerator.writeObject(anApp.getQueue());
+          jsonGenerator.writeFieldName("numberRuns");
+          jsonGenerator.writeNumber(anApp.getNumberRuns());
+          jsonGenerator.writeFieldName("firstRunId");
+          jsonGenerator.writeNumber(anApp.getFirstRunId());
+          jsonGenerator.writeFieldName("lastRunId");
+          jsonGenerator.writeNumber(anApp.getLastRunId());
+          jsonGenerator.writeFieldName("totalMaps");
+          jsonGenerator.writeNumber(anApp.getTotalMaps());
+          jsonGenerator.writeFieldName("totalReduces");
+          jsonGenerator.writeNumber(anApp.getTotalReduces());
+          jsonGenerator.writeFieldName("mapSlotMillis");
+          jsonGenerator.writeNumber(anApp.getMapSlotMillis());
+          jsonGenerator.writeFieldName("reduceSlotMillis");
+          jsonGenerator.writeNumber(anApp.getReduceSlotMillis());
+          jsonGenerator.writeFieldName("megaByteMillis");
+          jsonGenerator.writeNumber(anApp.getMbMillis());
+          jsonGenerator.writeFieldName("jobCount");
+          jsonGenerator.writeNumber(anApp.getJobCount());
+          jsonGenerator.writeFieldName("dailyCost");
+          jsonGenerator.writeNumber(anApp.getCost());
+          jsonGenerator.writeEndObject();
+        }
+
+      }
     }
   }
 }

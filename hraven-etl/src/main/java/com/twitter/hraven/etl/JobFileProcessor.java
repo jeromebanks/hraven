@@ -35,10 +35,14 @@ import org.apache.commons.cli.Option;
 import org.apache.commons.cli.Options;
 import org.apache.commons.cli.ParseException;
 import org.apache.commons.cli.PosixParser;
+import org.apache.commons.lang.StringUtils;
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.conf.Configured;
+import org.apache.hadoop.filecache.DistributedCache;
+import org.apache.hadoop.fs.FileSystem;
+import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.hbase.HBaseConfiguration;
 import org.apache.hadoop.hbase.client.Scan;
 import org.apache.hadoop.hbase.mapreduce.MultiTableOutputFormat;
@@ -50,6 +54,7 @@ import org.apache.hadoop.util.ToolRunner;
 import org.apache.log4j.Level;
 import org.apache.log4j.Logger;
 
+import com.twitter.hraven.AggregationConstants;
 import com.twitter.hraven.Constants;
 import com.twitter.hraven.datasource.JobHistoryRawService;
 import com.twitter.hraven.etl.ProcessRecordService;
@@ -120,6 +125,27 @@ public class JobFileProcessor extends Configured implements Tool {
     o.setRequired(false);
     options.addOption(o);
 
+    // Whether to aggregate or not.
+    // if re-process is on, need to consider turning aggregation off
+    o = new Option(
+        "a",
+        "aggregate",
+        true,
+        "Whether to aggreagate job details or not.");
+    o.setArgName("aggreagte");
+    o.setRequired(false);
+    options.addOption(o);
+
+    // Whether to force re-aggregation or not.
+    o = new Option(
+        "ra",
+        "re-aggregate",
+        true,
+        "Whether to re-aggreagate job details or not.");
+    o.setArgName("re-aggreagte");
+    o.setRequired(false);
+    options.addOption(o);
+
     // Batch
     o = new Option("b", "batchSize", true,
         "The number of files to process in one batch. Default "
@@ -149,6 +175,18 @@ public class JobFileProcessor extends Configured implements Tool {
     // Debugging
     options.addOption("d", "debug", false, "switch on DEBUG log level");
 
+    o = new Option("zf", "costFile", true, "The cost properties file location on HDFS");
+    o.setArgName("costfile_loc");
+    o.setRequired(true);
+    options.addOption(o);
+
+    // Machine type
+    o = new Option("m", "machineType", true,
+      "The type of machine this job ran on");
+    o.setArgName("machinetype");
+    o.setRequired(true);
+    options.addOption(o);
+
     CommandLineParser parser = new PosixParser();
     CommandLine commandLine = null;
     try {
@@ -167,6 +205,7 @@ public class JobFileProcessor extends Configured implements Tool {
     }
 
     return commandLine;
+
   }
 
   /*
@@ -229,6 +268,61 @@ public class JobFileProcessor extends Configured implements Tool {
     } else {
       batchSize = DEFAULT_BATCH_SIZE;
     }
+
+    // Grab the costfile argument
+
+    String costFilePath = commandLine.getOptionValue("zf");
+    LOG.info("cost properties file on hdfs=" + costFilePath);
+    if (costFilePath == null) costFilePath = Constants.COST_PROPERTIES_HDFS_DIR;
+    Path hdfsPath = new Path(costFilePath + Constants.COST_PROPERTIES_FILENAME);
+    // add to distributed cache
+    DistributedCache.addCacheFile(hdfsPath.toUri(), hbaseConf);
+    
+    // Grab the machine type argument
+    String machineType = commandLine.getOptionValue("m");
+    // set it as part of conf so that the
+    // hRaven job can access it in the mapper
+    hbaseConf.set(Constants.HRAVEN_MACHINE_TYPE, machineType);
+
+    // check if re-aggregate option is forced on
+    // if yes, we need to aggregate for this job inspite of
+    // job having aggregation done status in raw table
+    boolean reAggregateFlagValue = false;
+    if (commandLine.hasOption("ra")) {
+      String reaggregateFlag = commandLine.getOptionValue("ra");
+      // set it as part of conf so that the
+      // hRaven jobProcessor can access it in the mapper
+      if (StringUtils.isNotBlank(reaggregateFlag)) {
+        LOG.info(" reaggregateFlag is: " + reaggregateFlag);
+        if (StringUtils.equalsIgnoreCase(reaggregateFlag, Boolean.TRUE.toString())) {
+          reAggregateFlagValue = true;
+        }
+      }
+    }
+    LOG.info(AggregationConstants.RE_AGGREGATION_FLAG_NAME +"=" + reAggregateFlagValue);
+    hbaseConf.setBoolean(AggregationConstants.RE_AGGREGATION_FLAG_NAME, reAggregateFlagValue);
+
+    // set aggregation to off by default
+    boolean aggFlagValue = false;
+    if (commandLine.hasOption("a")) {
+      String aggregateFlag = commandLine.getOptionValue("a");
+      // set it as part of conf so that the
+      // hRaven jobProcessor can access it in the mapper
+      if (StringUtils.isNotBlank(aggregateFlag)) {
+        LOG.info(" aggregateFlag is: " + aggregateFlag);
+        if (StringUtils.equalsIgnoreCase(aggregateFlag, Boolean.TRUE.toString())) {
+          aggFlagValue = true;
+        } 
+      }
+    }
+    if(reprocess) {
+      // turn off aggregation if reprocessing is true
+      // we don't want to inadvertently aggregate again while re-processing
+      // re-aggregation needs to be a conscious setting
+      aggFlagValue = false;
+    }
+    LOG.info(AggregationConstants.AGGREGATION_FLAG_NAME +"=" + aggFlagValue);
+    hbaseConf.setBoolean(AggregationConstants.AGGREGATION_FLAG_NAME, aggFlagValue);
 
     String processFileSubstring = null;
     if (commandLine.hasOption("p")) {
@@ -596,17 +690,11 @@ public class JobFileProcessor extends Configured implements Tool {
 
   /**
    * DoIt.
-   * 
-   * @param args
-   *          the arguments to do it with
+   * @param args the arguments to do it with
+   * @throws Exception
    */
-  public static void main(String[] args) {
-    try {
-      ToolRunner.run(new JobFileProcessor(), args);
-    } catch (Exception e) {
-      // TODO Auto-generated catch block
-      e.printStackTrace();
-    }
+  public static void main(String[] args) throws Exception {
+    ToolRunner.run(new JobFileProcessor(), args);
   }
 
 }

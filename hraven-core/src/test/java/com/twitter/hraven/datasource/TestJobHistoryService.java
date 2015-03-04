@@ -17,13 +17,20 @@ package com.twitter.hraven.datasource;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertTrue;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.fail;
+import java.io.FileInputStream;
+import java.io.FileNotFoundException;
 import java.util.List;
-
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
+import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hbase.HBaseTestingUtility;
+import org.apache.hadoop.hbase.KeyValue;
 import org.apache.hadoop.hbase.client.HTable;
+import org.apache.hadoop.hbase.client.Put;
+import org.apache.hadoop.hbase.util.Bytes;
 import org.junit.AfterClass;
 import org.junit.BeforeClass;
 import org.junit.Test;
@@ -31,6 +38,7 @@ import org.junit.Test;
 import com.twitter.hraven.Constants;
 import com.twitter.hraven.Flow;
 import com.twitter.hraven.GenerateFlowTestData;
+import com.twitter.hraven.HadoopVersion;
 import com.twitter.hraven.JobDetails;
 import com.twitter.hraven.JobKey;
 import com.twitter.hraven.datasource.JobHistoryByIdService;
@@ -73,6 +81,14 @@ public class TestJobHistoryService {
     flowDataGen.loadFlow("c1@local", "fuser", "app1", 2345, "a", 2, 10,idService, historyTable);
     flowDataGen.loadFlow("c1@local", "fuser", "app1", 2456, "b", 2, 10,idService, historyTable);
 
+    // load flows for checking timebound flow scan with version
+    flowDataGen.loadFlow("c3@local", "kuser", "app9", 1395786712000L,
+        "version", 2, 10,idService, historyTable);
+    flowDataGen.loadFlow("c3@local", "kuser", "app9", 1395786725000L,
+      "version", 2, 10,idService, historyTable);
+    flowDataGen.loadFlow("c3@local", "kuser", "app9", 1395786712000L,
+      "version2", 3, 10,idService, historyTable);
+
     // read out job history flow directly
     JobHistoryService service = new JobHistoryService(UTIL.getConfiguration());
     try {
@@ -111,6 +127,22 @@ public class TestJobHistoryService {
       assertEquals("buser", firstJob.getJobKey().getUserName());
       assertEquals("app2", firstJob.getJobKey().getAppId());
       assertEquals(1212L, firstJob.getJobKey().getRunId());
+
+      // check the timebound scan for default time
+      long endTime = System.currentTimeMillis();
+      long startTime = endTime - Constants.THIRTY_DAYS_MILLIS;
+      flowSeries = service.getFlowSeries("c1@local", "buser", "app2",
+        "a", true, startTime, endTime, 100);
+      assertNotNull(flowSeries);
+      assertEquals(0, flowSeries.size());
+
+      // check the timebound scan for start and end times
+      endTime = System.currentTimeMillis();
+      startTime = 1395786712000L - 86400000L;
+      flowSeries = service.getFlowSeries( "c3@local", "kuser", "app9",
+        "version",true, startTime, endTime, 100);
+      assertNotNull(flowSeries);
+      assertEquals(2, flowSeries.size());
 
       flowSeries = service.getFlowSeries("c1@local", "fuser", "app1", 100);
       assertNotNull(flowSeries);
@@ -184,6 +216,31 @@ public class TestJobHistoryService {
     }
   }
 
+  @SuppressWarnings("deprecation")
+  private void checkSomeFlowStats(String version, HadoopVersion hv, int numJobs, long baseStats, List<Flow> flowSeries) {
+    assertNotNull(flowSeries);
+    for ( Flow f : flowSeries ){
+      assertEquals( numJobs, f.getJobCount());
+      assertEquals( numJobs * baseStats , f.getTotalMaps());
+      assertEquals( numJobs * baseStats , f.getTotalReduces());
+      assertEquals( numJobs * baseStats , f.getHdfsBytesRead());
+      assertEquals( numJobs * baseStats , f.getHdfsBytesWritten());
+      assertEquals( numJobs * baseStats , f.getMapFileBytesRead());
+      assertEquals( numJobs * baseStats , f.getMapFileBytesWritten());
+      assertEquals( numJobs * baseStats , f.getMapSlotMillis());
+      assertEquals( numJobs * baseStats , f.getReduceFileBytesRead());
+      assertEquals( numJobs * baseStats , f.getReduceShuffleBytes());
+      assertEquals( numJobs * baseStats , f.getReduceSlotMillis());
+      assertEquals( version , f.getVersion());
+      assertEquals( hv, f.getHadoopVersion());
+      assertEquals( numJobs * baseStats , f.getMegabyteMillis());
+      assertEquals( numJobs * 1000, f.getDuration());
+      assertEquals( f.getDuration() + GenerateFlowTestData.SUBMIT_LAUCH_DIFF, f.getWallClockTime());
+    }
+
+  }
+  
+  
   @Test
   public void testGetFlowTimeSeriesStats() throws Exception {
 
@@ -201,44 +258,11 @@ public class TestJobHistoryService {
     try {
       // fetch back the entire flow stats
       List<Flow> flowSeries = service.getFlowTimeSeriesStats("c1@local", "buser", "AppOne", "", 0L, 0L, 1000, null);
-      assertNotNull(flowSeries);
-      for ( Flow f : flowSeries ){
-        assertEquals( numJobsAppOne, f.getJobCount());
-        assertEquals( numJobsAppOne * baseStats , f.getTotalMaps());
-        assertEquals( numJobsAppOne * baseStats , f.getTotalReduces());
-        assertEquals( numJobsAppOne * baseStats , f.getHdfsBytesRead());
-        assertEquals( numJobsAppOne * baseStats , f.getHdfsBytesWritten());
-        assertEquals( numJobsAppOne * baseStats , f.getMapFileBytesRead());
-        assertEquals( numJobsAppOne * baseStats , f.getMapFileBytesWritten());
-        assertEquals( numJobsAppOne * baseStats , f.getMapSlotMillis());
-        assertEquals( numJobsAppOne * baseStats , f.getReduceFileBytesRead());
-        assertEquals( numJobsAppOne * baseStats , f.getReduceShuffleBytes());
-        assertEquals( numJobsAppOne * baseStats , f.getReduceSlotMillis());
-        assertEquals( "a" , f.getVersion());
-        assertEquals( numJobsAppOne * 1000, f.getDuration());
-        // verify that job configurations are empty
-        for (JobDetails job : f.getJobs()) {
-          assertEquals(0, job.getConfiguration().size());
-        }
-      }
+      checkSomeFlowStats("a", HadoopVersion.ONE, numJobsAppOne, baseStats, flowSeries);
 
       flowSeries = service.getFlowTimeSeriesStats("c1@local", "buser", "AppTwo", "", 0L, 0L, 1000, null);
-      assertNotNull(flowSeries);
-      for ( Flow f : flowSeries ){
-        assertEquals( numJobsAppTwo, f.getJobCount());
-        assertEquals( numJobsAppTwo * baseStats , f.getTotalMaps());
-        assertEquals( numJobsAppTwo * baseStats , f.getTotalReduces());
-        assertEquals( numJobsAppTwo * baseStats , f.getHdfsBytesRead());
-        assertEquals( numJobsAppTwo * baseStats , f.getHdfsBytesWritten());
-        assertEquals( numJobsAppTwo * baseStats , f.getMapFileBytesRead());
-        assertEquals( numJobsAppTwo * baseStats , f.getMapFileBytesWritten());
-        assertEquals( numJobsAppTwo * baseStats , f.getMapSlotMillis());
-        assertEquals( numJobsAppTwo * baseStats , f.getReduceFileBytesRead());
-        assertEquals( numJobsAppTwo * baseStats , f.getReduceShuffleBytes());
-        assertEquals( numJobsAppTwo * baseStats , f.getReduceSlotMillis());
-        assertEquals( "b" , f.getVersion());
-        assertEquals( numJobsAppTwo * 1000, f.getDuration());
-      }
+      checkSomeFlowStats("b", HadoopVersion.ONE, numJobsAppTwo, baseStats, flowSeries);
+
     } finally {
       service.close();
     }
@@ -285,6 +309,90 @@ public class TestJobHistoryService {
     } finally {
       service.close();
     }
+  }
+
+  private void assertFoundOnce(byte[] column, Put jobPut, int expectedSize,
+		  String expectedValue) {
+	  boolean foundUserName = false;
+	  List<KeyValue> kv1 = jobPut.get(Constants.INFO_FAM_BYTES, column);
+	  assertEquals(expectedSize, kv1.size());
+	  for (KeyValue kv : kv1) {
+		assertEquals(Bytes.toString(kv.getValue()), expectedValue);
+	    // ensure we don't see the same put twice
+		assertFalse(foundUserName);
+		// now set this to true
+		foundUserName = true;
+  	  }
+      // ensure that we got the user name
+	  assertTrue(foundUserName);
+  }
+
+  @Test
+  public void testSetHravenQueueName() throws FileNotFoundException {
+
+	  final String JOB_CONF_FILE_NAME =
+		        "src/test/resources/job_1329348432655_0001_conf.xml";
+
+	  Configuration jobConf = new Configuration();
+	  jobConf.addResource(new FileInputStream(JOB_CONF_FILE_NAME));
+
+	  String USERNAME = "user";
+	  JobKey jobKey = new JobKey("cluster1", USERNAME, "Sleep", 1,
+			  "job_1329348432655_0001");
+	  byte[] jobKeyBytes = new JobKeyConverter().toBytes(jobKey);
+	  Put jobPut = new Put(jobKeyBytes);
+	  byte[] jobConfColumnPrefix = Bytes.toBytes(Constants.JOB_CONF_COLUMN_PREFIX
+	        + Constants.SEP);
+
+	  assertEquals(jobPut.size(), 0);
+
+	  // check queuename matches user name since the conf has
+	  // value "default" as the queuename
+	  JobHistoryService.setHravenQueueNamePut(jobConf, jobPut, jobKey, jobConfColumnPrefix);
+	  assertEquals(jobPut.size(), 1);
+	  byte[] column = Bytes.add(jobConfColumnPrefix, Constants.HRAVEN_QUEUE_BYTES);
+	  assertFoundOnce(column, jobPut, 1, USERNAME);
+
+	  // populate the jobConf with all types of queue name parameters
+	  String expH2QName = "hadoop2queue";
+	  String expH1PoolName = "fairpool";
+	  String capacityH1QName = "capacity1aueue";
+	  jobConf.set(Constants.QUEUENAME_HADOOP2, expH2QName);
+	  jobConf.set(Constants.FAIR_SCHEDULER_POOLNAME_HADOOP1, expH1PoolName);
+	  jobConf.set(Constants.CAPACITY_SCHEDULER_QUEUENAME_HADOOP1, capacityH1QName);
+
+	  // now check queuename is correctly set as hadoop2 queue name
+	  // even when the fairscheduler and capacity scheduler are set
+	  jobPut = new Put(jobKeyBytes);
+	  assertEquals(jobPut.size(), 0);
+	  JobHistoryService.setHravenQueueNamePut(jobConf, jobPut, jobKey, jobConfColumnPrefix);
+	  assertEquals(jobPut.size(), 1);
+	  assertFoundOnce(column, jobPut, 1, expH2QName);
+
+	  // now unset hadoop2 queuename, expect fairscheduler name to be used as queuename
+	  jobConf.set(Constants.QUEUENAME_HADOOP2, "");
+	  jobPut = new Put(jobKeyBytes);
+	  assertEquals(jobPut.size(), 0);
+	  JobHistoryService.setHravenQueueNamePut(jobConf, jobPut, jobKey, jobConfColumnPrefix);
+	  assertEquals(jobPut.size(), 1);
+	  assertFoundOnce(column, jobPut, 1, expH1PoolName);
+
+	  // now unset fairscheduler name, expect capacity scheduler to be used as queuename
+	  jobConf.set(Constants.FAIR_SCHEDULER_POOLNAME_HADOOP1, "");
+	  jobPut = new Put(jobKeyBytes);
+	  assertEquals(jobPut.size(), 0);
+	  JobHistoryService.setHravenQueueNamePut(jobConf, jobPut, jobKey, jobConfColumnPrefix);
+	  assertEquals(jobPut.size(), 1);
+	  assertFoundOnce(column, jobPut, 1, capacityH1QName);
+
+	  // now unset capacity scheduler, expect default_queue to be used as queuename
+	  jobConf.set(Constants.CAPACITY_SCHEDULER_QUEUENAME_HADOOP1, "");
+	  jobPut = new Put(jobKeyBytes);
+	  assertEquals(jobPut.size(), 0);
+	  JobHistoryService.setHravenQueueNamePut(jobConf, jobPut, jobKey, jobConfColumnPrefix);
+	  assertEquals(jobPut.size(), 1);
+	  assertFoundOnce(column, jobPut, 1, Constants.DEFAULT_QUEUENAME);
+
   }
 
   private void assertJob(JobDetails expected, JobDetails actual) {

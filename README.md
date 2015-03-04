@@ -1,4 +1,4 @@
-hRaven [![Build Status](https://travis-ci.org/twitter/hraven.png)](https://travis-ci.org/twitter/hraven)
+hRaven [![Build Status](https://travis-ci.org/twitter/hraven.png)](https://travis-ci.org/twitter/hraven) [![Coverage Status](https://coveralls.io/repos/twitter/hraven/badge.png?branch=master)](https://coveralls.io/r/twitter/hraven?branch=master)
 ==========
 
 hRaven collects run time data and statistics from map reduce jobs running on
@@ -17,8 +17,8 @@ Requirements
   data storage
 * Apache Hadoop - hRaven current supports collection of job data on specific
   versions of Hadoop:
-  * CDH3 (up to u4)
-  * *Note:* CDH3u5, Hadoop 1.x, and Hadoop 2.0 are NOT YET supported, though work is in progress to fix this
+  * CDH upto CDH3u5, Hadoop 1.x upto MAPREDUCE-1016
+  * Hadoop 1.x post MAPREDUCE-1016 and Hadoop 2.0 are supported in versions 0.9.4 onwards
 
 Quick start
 --------------------
@@ -133,6 +133,11 @@ Optional QS params:
 *Note:* This endpoint duplicates functionality from the "/flow/" endpoint and
  maybe be combined back in to it in the future.
 
+### Get Tasks
+
+Path: `/tasks/<cluster>/[jobId]`
+
+Returns: task details of that single job
 
 ### Get App Versions
 
@@ -142,6 +147,17 @@ Optional QS params:
 
 * `limit` - max results to return
 
+### Get New Jobs
+
+Path: `/newJobs/<cluster>/`
+
+Returns: list of apps with only minimal stats
+
+Optional params:
+ * `startTime` (epoch timestamp in milliseconds)
+ * `endTime` (epoch timestamp in milliseconds)
+ * `limit` (max rows to return)
+ * `user` (user name to filter it by)
 
 Project Resources
 --------------------
@@ -168,9 +184,7 @@ For more details on how to contribute to hRaven, see CONTRIBUTING.md.
 Known Issues
 --------------------
 
-1. CDH3u5 has changed the directory layout used by the Job Tracker to store history files for completed map reduce jobs.  The JobFilePrepocessor needs to be updated to correctly handle the new structure.
-2. hRaven needs to be updated to load job history files from Hadoop 2.0.
-3. While hRaven stores the full data available from job history logs, the rolled-up statistics in the `Flow` class only represent data from sucessful task attempts.  We plan to extend this so that the `Flow` class also reflects resources used by failed and killed task attempts.
+1. While hRaven stores the full data available from job history logs, the rolled-up statistics in the `Flow` class only represent data from sucessful task attempts.  We plan to extend this so that the `Flow` class also reflects resources used by failed and killed task attempts.
 
 Copyright and License
 ---------------------

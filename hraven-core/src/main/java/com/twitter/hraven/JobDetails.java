@@ -22,16 +22,16 @@ import java.util.NavigableMap;
 
 import org.apache.commons.lang.builder.CompareToBuilder;
 import org.apache.commons.lang.builder.HashCodeBuilder;
-import org.apache.commons.logging.Log;
-import org.apache.commons.logging.LogFactory;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hbase.client.Result;
 import org.apache.hadoop.hbase.util.Bytes;
 import org.codehaus.jackson.annotate.JsonCreator;
 import org.codehaus.jackson.annotate.JsonProperty;
 import org.codehaus.jackson.map.annotate.JsonSerialize;
+import org.apache.commons.lang.NotImplementedException;
 
 import com.twitter.hraven.datasource.JobHistoryService;
+import com.twitter.hraven.util.ByteUtil;
 
 /**
  * Represents the configuration, statistics, and counters from a single
@@ -42,8 +42,6 @@ import com.twitter.hraven.datasource.JobHistoryService;
   include= JsonSerialize.Inclusion.NON_NULL
 )
 public class JobDetails implements Comparable<JobDetails> {
-  @SuppressWarnings("unused")
-  private static Log LOG = LogFactory.getLog(JobDetails.class);
 
   // job key -- maps to row key
   private JobKey jobKey;
@@ -57,6 +55,8 @@ public class JobDetails implements Comparable<JobDetails> {
   private String priority;
   private String status;
   private String version;
+  private HadoopVersion hadoopVersion;
+  private String queue;
   private long submitTime;
   private long launchTime;
   private long finishTime;
@@ -74,6 +74,8 @@ public class JobDetails implements Comparable<JobDetails> {
   private long mapSlotMillis;
   private long reduceSlotMillis;
   private long reduceShuffleBytes;
+  private long megabyteMillis;
+  private double cost;
 
   // job config
   private Configuration config;
@@ -174,6 +176,15 @@ public class JobDetails implements Comparable<JobDetails> {
 
   public void setVersion(String version) {
     this.version = version;
+  }
+
+  public HadoopVersion getHadoopVersion() {
+    return hadoopVersion;
+  }
+
+  public void setHadoopVersion(String hadoopVersion) {
+    // the enum.valueOf could throw a NPE or IllegalArgumentException
+    this.hadoopVersion = HadoopVersion.valueOf(hadoopVersion);
   }
 
   public long getSubmitTime() {
@@ -332,12 +343,40 @@ public class JobDetails implements Comparable<JobDetails> {
     this.hdfsBytesRead = hdfsBytesRead;
   }
 
+  public long getMegabyteMillis() {
+    return megabyteMillis;
+  }
+
+  public void setMegabyteMillis(long megabyteMillis) {
+    this.megabyteMillis = megabyteMillis;
+  }
+
+  public double getCost() {
+    return cost;
+  }
+
+  public void setCost(double cost) {
+    this.cost = cost;
+  }
+
   public void addTask(TaskDetails task) {
     this.tasks.add(task);
   }
 
+  public void addTasks(List<TaskDetails> tasks) {
+    this.tasks.addAll(tasks);
+  }
+
   public List<TaskDetails> getTasks() {
     return this.tasks;
+  }
+
+  public String getQueue() {
+    return queue;
+  }
+
+  public void setQueue(String queue) {
+    this.queue = queue;
   }
 
   public Configuration getConfiguration() {
@@ -361,141 +400,183 @@ public class JobDetails implements Comparable<JobDetails> {
   void setCounters(CounterMap counters) { this.counters = counters; }
   void setMapCounters(CounterMap mapCounters) { this.mapCounters = mapCounters; }
   void setReduceCounters(CounterMap reduceCounters) { this.reduceCounters = reduceCounters; }
+  
+  /**
+   * Do not use, this is for JSON deserialization only.
+   * @param newTasks
+   */
+  @Deprecated
+  public void setTasks(List<TaskDetails> newTasks) {
+    if ((newTasks != null) && (newTasks.size() > 0)) {
+      throw new NotImplementedException("Expected to be invoked only during deserialization "
+            + "for empty/null TaskDetails. Deserialization of non-empty TaskDetails should not be done "
+            + "in this setter but by implementing a TaskDetails Custom Deserializer in ClientObjectMapper.");
+    }
+    this.tasks.clear();
+  }
+
+  /**
+   * return a value for that counters from the NavigableMap as a Long
+   * @param key
+   * @param infoValues
+   * @return counter value as Long or 0L
+   */
+  Long getCounterValueAsLong(final CounterMap counters, final String counterGroupName,
+      final String counterName) {
+    Counter c1 = counters.getCounter(counterGroupName, counterName);
+    if (c1 != null) {
+      return c1.getValue();
+    } else {
+      return 0L;
+    }
+  }
+
+  /**
+   * return an enum value from the NavigableMap for hadoop version
+   * @param key
+   * @param infoValues
+   * @return value as a enum or default of hadoop ONE
+   */
+  private HadoopVersion getHadoopVersionFromResult(final JobHistoryKeys key,
+      final NavigableMap<byte[], byte[]> infoValues) {
+    byte[] value = infoValues.get(JobHistoryKeys.KEYS_TO_BYTES.get(key));
+    if (value != null) {
+      String hv = Bytes.toString(value);
+      // could throw an NPE or IllegalArgumentException
+      return HadoopVersion.valueOf(hv);
+    } else {
+      // default is hadoop 1
+      return HadoopVersion.ONE;
+    }
+  }
 
   /** TODO: refactor this out into a data access layer */
   public void populate(Result result) {
     // process job-level stats and properties
-    NavigableMap<byte[],byte[]> infoValues = result.getFamilyMap(Constants.INFO_FAM_BYTES);
-    if (infoValues.containsKey(JobHistoryKeys.KEYS_TO_BYTES.get(JobHistoryKeys.JOBID))) {
-      this.jobId = Bytes.toString(
-          infoValues.get(JobHistoryKeys.KEYS_TO_BYTES.get(JobHistoryKeys.JOBID)));
-    }
-    if (infoValues.containsKey(JobHistoryKeys.KEYS_TO_BYTES.get(JobHistoryKeys.USER))) {
-      this.user = Bytes.toString(
-          infoValues.get(JobHistoryKeys.KEYS_TO_BYTES.get(JobHistoryKeys.USER)));
-    }
-    if (infoValues.containsKey(JobHistoryKeys.KEYS_TO_BYTES.get(JobHistoryKeys.JOBNAME))) {
-      this.jobName = Bytes.toString(
-          infoValues.get(JobHistoryKeys.KEYS_TO_BYTES.get(JobHistoryKeys.JOBNAME)));
-    }
-    if (infoValues.containsKey(JobHistoryKeys.KEYS_TO_BYTES.get(JobHistoryKeys.JOB_PRIORITY))) {
-      this.priority = Bytes.toString(
-          infoValues.get(JobHistoryKeys.KEYS_TO_BYTES.get(JobHistoryKeys.JOB_PRIORITY)));
-    }
-    if (infoValues.containsKey(JobHistoryKeys.KEYS_TO_BYTES.get(JobHistoryKeys.JOB_STATUS))) {
-      this.status = Bytes.toString(
-          infoValues.get(JobHistoryKeys.KEYS_TO_BYTES.get(JobHistoryKeys.JOB_STATUS)));
-    }
-    if (infoValues.containsKey(Constants.VERSION_COLUMN_BYTES)) {
-      this.version = Bytes.toString(infoValues.get(Constants.VERSION_COLUMN_BYTES));
-    }
+    NavigableMap<byte[], byte[]> infoValues = result.getFamilyMap(Constants.INFO_FAM_BYTES);
+
+    this.jobId = ByteUtil.getValueAsString(JobHistoryKeys.KEYS_TO_BYTES
+          .get(JobHistoryKeys.JOBID), infoValues);
+    this.user = ByteUtil.getValueAsString(JobHistoryKeys.KEYS_TO_BYTES
+          .get(JobHistoryKeys.USER), infoValues);
+    this.jobName = ByteUtil.getValueAsString(JobHistoryKeys.KEYS_TO_BYTES
+          .get(JobHistoryKeys.JOBNAME),infoValues);
+    this.priority = ByteUtil.getValueAsString(JobHistoryKeys.KEYS_TO_BYTES
+          .get(JobHistoryKeys.JOB_PRIORITY), infoValues);
+    this.status = ByteUtil.getValueAsString(JobHistoryKeys.KEYS_TO_BYTES
+          .get(JobHistoryKeys.JOB_STATUS), infoValues);
+    this.hadoopVersion = getHadoopVersionFromResult(JobHistoryKeys.hadoopversion, infoValues);
+    this.version = ByteUtil.getValueAsString(Constants.VERSION_COLUMN_BYTES, infoValues);
+    this.cost = ByteUtil.getValueAsDouble(Constants.JOBCOST_BYTES, infoValues);
 
     // times
-    if (infoValues.containsKey(JobHistoryKeys.KEYS_TO_BYTES.get(JobHistoryKeys.SUBMIT_TIME))) {
-      this.submitTime = Bytes.toLong(
-          infoValues.get(JobHistoryKeys.KEYS_TO_BYTES.get(JobHistoryKeys.SUBMIT_TIME)));
-    }
-    if (infoValues.containsKey(JobHistoryKeys.KEYS_TO_BYTES.get(JobHistoryKeys.LAUNCH_TIME))) {
-      this.launchTime = Bytes.toLong(
-          infoValues.get(JobHistoryKeys.KEYS_TO_BYTES.get(JobHistoryKeys.LAUNCH_TIME)));
-    }
-    if (infoValues.containsKey(JobHistoryKeys.KEYS_TO_BYTES.get(JobHistoryKeys.FINISH_TIME))) {
-      this.finishTime = Bytes.toLong(
-          infoValues.get(JobHistoryKeys.KEYS_TO_BYTES.get(JobHistoryKeys.FINISH_TIME)));
-    }
+    this.submitTime = ByteUtil.getValueAsLong(JobHistoryKeys.KEYS_TO_BYTES
+          .get(JobHistoryKeys.SUBMIT_TIME), infoValues);
+    this.launchTime = ByteUtil.getValueAsLong(JobHistoryKeys.KEYS_TO_BYTES
+          .get(JobHistoryKeys.LAUNCH_TIME), infoValues);
+    this.finishTime = ByteUtil.getValueAsLong(JobHistoryKeys.KEYS_TO_BYTES
+          .get(JobHistoryKeys.FINISH_TIME), infoValues);
+    this.megabyteMillis = ByteUtil.getValueAsLong(Constants.MEGABYTEMILLIS_BYTES, infoValues);
+    this.cost = ByteUtil.getValueAsDouble(Constants.JOBCOST_BYTES, infoValues);
 
     // task counts
-    if (infoValues.containsKey(JobHistoryKeys.KEYS_TO_BYTES.get(JobHistoryKeys.TOTAL_MAPS))) {
-      this.totalMaps = Bytes.toLong(
-          infoValues.get(JobHistoryKeys.KEYS_TO_BYTES.get(JobHistoryKeys.TOTAL_MAPS)));
-    }
-    if (infoValues.containsKey(JobHistoryKeys.KEYS_TO_BYTES.get(JobHistoryKeys.TOTAL_REDUCES))) {
-      this.totalReduces = Bytes.toLong(
-          infoValues.get(JobHistoryKeys.KEYS_TO_BYTES.get(JobHistoryKeys.TOTAL_REDUCES)));
-    }
-    if (infoValues.containsKey(JobHistoryKeys.KEYS_TO_BYTES.get(JobHistoryKeys.FINISHED_MAPS))) {
-      this.finishedMaps = Bytes.toLong(
-          infoValues.get(JobHistoryKeys.KEYS_TO_BYTES.get(JobHistoryKeys.FINISHED_MAPS)));
-    }
-    if (infoValues.containsKey(JobHistoryKeys.KEYS_TO_BYTES.get(JobHistoryKeys.FINISHED_REDUCES))) {
-      this.finishedReduces = Bytes.toLong(
-          infoValues.get(JobHistoryKeys.KEYS_TO_BYTES.get(JobHistoryKeys.FINISHED_REDUCES)));
-    }
-    if (infoValues.containsKey(JobHistoryKeys.KEYS_TO_BYTES.get(JobHistoryKeys.FAILED_MAPS))) {
-      this.failedMaps = Bytes.toLong(
-          infoValues.get(JobHistoryKeys.KEYS_TO_BYTES.get(JobHistoryKeys.FAILED_MAPS)));
-    }
-    if (infoValues.containsKey(JobHistoryKeys.KEYS_TO_BYTES.get(JobHistoryKeys.FAILED_REDUCES))) {
-      this.failedReduces = Bytes.toLong(
-          infoValues.get(JobHistoryKeys.KEYS_TO_BYTES.get(JobHistoryKeys.FAILED_REDUCES)));
-    }
+    this.totalMaps =
+        ByteUtil.getValueAsLong(JobHistoryKeys.KEYS_TO_BYTES.get(JobHistoryKeys.TOTAL_MAPS),
+          infoValues);
+    this.totalReduces =
+        ByteUtil.getValueAsLong(JobHistoryKeys.KEYS_TO_BYTES.get(JobHistoryKeys.TOTAL_REDUCES),
+          infoValues);
+    this.finishedMaps =
+        ByteUtil.getValueAsLong(JobHistoryKeys.KEYS_TO_BYTES.get(JobHistoryKeys.FINISHED_MAPS),
+          infoValues);
+    this.finishedReduces =
+        ByteUtil.getValueAsLong(JobHistoryKeys.KEYS_TO_BYTES.get(JobHistoryKeys.FINISHED_REDUCES),
+          infoValues);
+    this.failedMaps =
+        ByteUtil.getValueAsLong(JobHistoryKeys.KEYS_TO_BYTES.get(JobHistoryKeys.FAILED_MAPS),
+          infoValues);
+    this.failedReduces =
+        ByteUtil.getValueAsLong(JobHistoryKeys.KEYS_TO_BYTES.get(JobHistoryKeys.FAILED_REDUCES),
+          infoValues);
 
     this.config = JobHistoryService.parseConfiguration(infoValues);
-    this.counters = JobHistoryService.parseCounters(
-        Constants.COUNTER_COLUMN_PREFIX_BYTES, infoValues);
-    this.mapCounters = JobHistoryService.parseCounters(
-        Constants.MAP_COUNTER_COLUMN_PREFIX_BYTES, infoValues);
-    this.reduceCounters = JobHistoryService.parseCounters(
-        Constants.REDUCE_COUNTER_COLUMN_PREFIX_BYTES, infoValues);
+    this.queue = this.config.get(Constants.HRAVEN_QUEUE);
+    this.counters = JobHistoryService.parseCounters(Constants.COUNTER_COLUMN_PREFIX_BYTES,
+        infoValues);
+    this.mapCounters = JobHistoryService.parseCounters(Constants.MAP_COUNTER_COLUMN_PREFIX_BYTES,
+        infoValues);
+    this.reduceCounters = JobHistoryService.parseCounters(Constants.REDUCE_COUNTER_COLUMN_PREFIX_BYTES,
+        infoValues);
 
-    // populate stats from counters for this job
-    // map file bytes read
-    if (this.mapCounters.getCounter(Constants.FILESYSTEM_COUNTERS, Constants.FILES_BYTES_READ) != null) {
-      this.mapFileBytesRead =
-          this.mapCounters.getCounter(Constants.FILESYSTEM_COUNTERS, Constants.FILES_BYTES_READ)
-              .getValue();
+    // populate stats from counters for this job based on
+    // hadoop version
+    if (this.hadoopVersion == HadoopVersion.TWO) {
+      // map file bytes read
+      this.mapFileBytesRead = getCounterValueAsLong(this.mapCounters, 
+            Constants.FILESYSTEM_COUNTER_HADOOP2, Constants.FILES_BYTES_READ);
+
+      // map file bytes written
+      this.mapFileBytesWritten = getCounterValueAsLong(this.mapCounters,
+            Constants.FILESYSTEM_COUNTER_HADOOP2, Constants.FILES_BYTES_WRITTEN);
+
+      // reduce file bytes read
+      this.reduceFileBytesRead = getCounterValueAsLong(this.reduceCounters,
+            Constants.FILESYSTEM_COUNTER_HADOOP2, Constants.FILES_BYTES_READ);
+
+      // hdfs bytes read
+      this.hdfsBytesRead = getCounterValueAsLong(this.counters, Constants.FILESYSTEM_COUNTER_HADOOP2,
+            Constants.HDFS_BYTES_READ);
+
+      // hdfs bytes written
+      this.hdfsBytesWritten = getCounterValueAsLong(this.counters, Constants.FILESYSTEM_COUNTER_HADOOP2,
+            Constants.HDFS_BYTES_WRITTEN);
+
+      // map slot millis
+      this.mapSlotMillis = getCounterValueAsLong(this.counters, Constants.JOB_COUNTER_HADOOP2,
+            Constants.SLOTS_MILLIS_MAPS);
+
+      // reduce slot millis
+      this.reduceSlotMillis = getCounterValueAsLong(this.counters, Constants.JOB_COUNTER_HADOOP2,
+            Constants.SLOTS_MILLIS_REDUCES);
+
+      // reduce shuffle bytes
+      this.reduceShuffleBytes = getCounterValueAsLong(this.reduceCounters, Constants.TASK_COUNTER_HADOOP2,
+            Constants.REDUCE_SHUFFLE_BYTES);
+    } else { // presume it's hadoop1
+      // map file bytes read
+      this.mapFileBytesRead = getCounterValueAsLong(this.mapCounters, Constants.FILESYSTEM_COUNTERS,
+            Constants.FILES_BYTES_READ);
+
+      // map file bytes written
+      this.mapFileBytesWritten = getCounterValueAsLong(this.mapCounters, Constants.FILESYSTEM_COUNTERS,
+            Constants.FILES_BYTES_WRITTEN);
+
+      // reduce file bytes read
+      this.reduceFileBytesRead = getCounterValueAsLong(this.reduceCounters, Constants.FILESYSTEM_COUNTERS,
+            Constants.FILES_BYTES_READ);
+
+      // hdfs bytes read
+      this.hdfsBytesRead = getCounterValueAsLong(this.counters, Constants.FILESYSTEM_COUNTERS,
+            Constants.HDFS_BYTES_READ);
+
+      // hdfs bytes written
+      this.hdfsBytesWritten = getCounterValueAsLong(this.counters, Constants.FILESYSTEM_COUNTERS,
+            Constants.HDFS_BYTES_WRITTEN);
+
+      // map slot millis
+      this.mapSlotMillis = getCounterValueAsLong(this.counters, Constants.JOBINPROGRESS_COUNTER,
+            Constants.SLOTS_MILLIS_MAPS);
+
+      // reduce slot millis
+      this.reduceSlotMillis = getCounterValueAsLong(this.counters, Constants.JOBINPROGRESS_COUNTER,
+            Constants.SLOTS_MILLIS_REDUCES);
+
+      // reduce shuffle bytes
+      this.reduceShuffleBytes = getCounterValueAsLong(this.reduceCounters, Constants.TASK_COUNTER,
+            Constants.REDUCE_SHUFFLE_BYTES);
     }
-
-    // map file bytes written
-    if (this.mapCounters.getCounter(Constants.FILESYSTEM_COUNTERS, Constants.FILES_BYTES_WRITTEN) != null) {
-      this.mapFileBytesWritten =
-          this.mapCounters.getCounter(Constants.FILESYSTEM_COUNTERS, Constants.FILES_BYTES_WRITTEN)
-              .getValue();
-    }
-
-    // reduce file bytes read
-    if (this.reduceCounters.getCounter(Constants.FILESYSTEM_COUNTERS, Constants.FILES_BYTES_READ) != null) {
-      this.reduceFileBytesRead =
-          this.reduceCounters.getCounter(Constants.FILESYSTEM_COUNTERS, Constants.FILES_BYTES_READ)
-              .getValue();
-    }
-
-    // hdfs bytes read
-    if (this.counters.getCounter(Constants.FILESYSTEM_COUNTERS, Constants.HDFS_BYTES_READ) != null) {
-      this.hdfsBytesRead =
-          this.counters.getCounter(Constants.FILESYSTEM_COUNTERS, Constants.HDFS_BYTES_READ)
-              .getValue();
-    }
-
-    // hdfs bytes written
-    if (this.counters.getCounter(Constants.FILESYSTEM_COUNTERS, Constants.HDFS_BYTES_WRITTEN) != null) {
-      this.hdfsBytesWritten =
-          this.counters.getCounter(Constants.FILESYSTEM_COUNTERS, Constants.HDFS_BYTES_WRITTEN)
-              .getValue();
-    }
-
-    // map slot millis
-    if (this.counters.getCounter(Constants.JOBINPROGRESS_COUNTER, Constants.SLOTS_MILLIS_MAPS) != null) {
-      this.mapSlotMillis =
-          this.counters.getCounter(Constants.JOBINPROGRESS_COUNTER, Constants.SLOTS_MILLIS_MAPS)
-              .getValue();
-    }
-
-    // reduce slot millis
-    if (this.counters.getCounter(Constants.JOBINPROGRESS_COUNTER, Constants.SLOTS_MILLIS_REDUCES) != null) {
-      this.reduceSlotMillis =
-          this.counters.getCounter(Constants.JOBINPROGRESS_COUNTER, Constants.SLOTS_MILLIS_REDUCES)
-              .getValue();
-    }
-
-    // reduce shuffle bytes
-    if (this.reduceCounters.getCounter(Constants.TASK_COUNTER, Constants.REDUCE_SHUFFLE_BYTES) != null) {
-      this.reduceShuffleBytes =
-          this.reduceCounters.getCounter(Constants.TASK_COUNTER, Constants.REDUCE_SHUFFLE_BYTES)
-              .getValue();
-    }
-
     // populate the task-level data
+    // TODO: make sure to properly implement setTasks(...) before adding TaskDetails
     //populateTasks(result.getFamilyMap(Constants.TASK_FAM_BYTES));
   }
 

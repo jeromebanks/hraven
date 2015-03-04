@@ -31,6 +31,7 @@ import org.apache.hadoop.mapred.JobHistoryCopy.Listener;
 import org.apache.hadoop.mapred.JobHistoryCopy.RecordTypes;
 
 import com.twitter.hraven.Constants;
+import com.twitter.hraven.JobDetails;
 import com.twitter.hraven.JobHistoryKeys;
 import com.twitter.hraven.JobKey;
 import com.twitter.hraven.TaskKey;
@@ -48,6 +49,8 @@ public class JobHistoryListener implements Listener {
   /** Job ID, minus the leading "job_" */
   private String jobNumber = "";
   private final byte[] jobKeyBytes;
+
+  private JobDetails jobDetails = null;
   private List<Put> jobPuts = new LinkedList<Put>();
   private List<Put> taskPuts = new LinkedList<Put>();
   private JobKeyConverter jobKeyConv = new JobKeyConverter();
@@ -67,6 +70,7 @@ public class JobHistoryListener implements Listener {
     }
     this.jobKey = jobKey;
     this.jobKeyBytes = jobKeyConv.toBytes(jobKey);
+    this.jobDetails = new JobDetails(jobKey);
     setJobId(jobKey.getJobId().getJobIdString());
   }
 
@@ -110,6 +114,23 @@ public class JobHistoryListener implements Listener {
       addKeyValues(p, Constants.INFO_FAM_BYTES, e.getKey(), e.getValue());
     }
     this.jobPuts.add(p);
+
+  }
+
+  /**
+   * sets the hadoop version put in the list of job puts
+   * @param pVersion
+   * @throws IllegalArgumentException if put is null
+   */
+  public void includeHadoopVersionPut(Put pVersion) {
+	  // set the hadoop version for this record
+	  if (pVersion != null) {
+		  this.jobPuts.add(pVersion);
+	  } else {
+		  String msg = "Hadoop Version put cannot be null";
+		  LOG.error(msg);
+		  throw new IllegalArgumentException(msg);
+	  }
   }
 
   private void handleTask(Map<JobHistoryKeys, String> values) {
@@ -177,8 +198,17 @@ public class JobHistoryListener implements Listener {
           byte[] groupPrefix = Bytes.add(
               counterPrefix, Bytes.toBytes(group.getName()), Constants.SEP_BYTES);
           for (Counters.Counter counter : group) {
-            byte[] qualifier = Bytes.add(groupPrefix, Bytes.toBytes(counter.getName()));
-            p.add(family, qualifier, Bytes.toBytes(counter.getValue()));
+            String counterName = counter.getName();
+            long counterValue = counter.getValue();
+            byte[] qualifier = Bytes.add(groupPrefix, Bytes.toBytes(counterName));
+            p.add(family, qualifier, Bytes.toBytes(counterValue));
+            // get the map and reduce slot millis for megabytemillis calculations
+            if (Constants.SLOTS_MILLIS_MAPS.equals(counterName)) {
+              this.jobDetails.setMapSlotMillis(counterValue);
+            }
+            if (Constants.SLOTS_MILLIS_REDUCES.equals(counterName)) {
+              this.jobDetails.setReduceSlotMillis(counterValue);
+            }
           }
         }
       } catch (ParseException pe) {
@@ -198,8 +228,14 @@ public class JobHistoryListener implements Listener {
         }
       } else if (Long.class.equals(clazz)) {
         try {
-          valueBytes = (value != null && value.trim().length() > 0) ?
-              Bytes.toBytes(Long.parseLong(value)) : Constants.ZERO_LONG_BYTES;
+          long valueLong = (value != null && value.trim().length() > 0) ?
+              Long.parseLong(value) : 0L;
+          valueBytes = Bytes.toBytes(valueLong);
+          if (key == JobHistoryKeys.TOTAL_MAPS) {
+            jobDetails.setTotalMaps(valueLong);
+          } else if (key == JobHistoryKeys.TOTAL_REDUCES) {
+            jobDetails.setTotalReduces(valueLong);
+          }
         } catch (NumberFormatException nfe) {
           // us a default value
           valueBytes = Constants.ZERO_LONG_BYTES;
@@ -244,6 +280,14 @@ public class JobHistoryListener implements Listener {
   }
 
   /**
+   * getter for jobKeyBytes
+   * @return the byte array of jobKeyBytes
+   */
+  public byte[] getJobKeyBytes() {
+	return this.jobKeyBytes;
+  }
+
+  /**
    * Return the generated list of put assembled when
    *         {@link JobHistoryCopy#parseHistoryFromFS(String, Listener, org.apache.hadoop.fs.FileSystem)}
    *         is called with this listener.
@@ -255,5 +299,9 @@ public class JobHistoryListener implements Listener {
 
   public List<Put> getTaskPuts() {
     return this.taskPuts;
+  }
+
+  public JobDetails getJobDetails() {
+    return this.jobDetails;
   }
 }
